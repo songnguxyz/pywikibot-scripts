@@ -1,44 +1,72 @@
+#!/usr/bin/python3
+"""
+This script reverses character names in wiki links based on a validation list.
+Example: Changes [[Aoi Megumi]] to [[Megumi Aoi]] if valid.
+
+It fetches a list of valid names from 'MediaWiki:CharacterList'.
+
+Usage:
+    python3 character_link_reverser.py [generator options] [-always]
+
+    To run on a specific page:
+    python3 character_link_reverser.py -page:"Page Title"
+
+    To run on all pages in main namespace:
+    python3 character_link_reverser.py -ns:0 -start:!
+
+Options:
+    -always     Don't prompt to save changes.
+    -summary:   Custom edit summary.
+"""
+
 import pywikibot
 import re
-import sys
-import difflib
+from pywikibot import pagegenerators, textlib
+from pywikibot.bot import SingleSiteBot, CurrentPageBot
 
-# Danh sách regex để xác định tên nhân vật cần đảo
-REGEX_PATTERNS = [
-    r'^[A-Z][a-z]+ [A-Z][a-z]+$'                     # VD: Aoi Megumi
-]
-
-# Trang chứa danh sách tên nhân vật chuẩn
+# Configuration
 NAME_LIST_PAGE = "MediaWiki:CharacterList"
 
-def reverse_name(name: str) -> str:
-    parts = name.split()
-    return ' '.join(parts[::-1]) if len(parts) >= 2 else name
+class CharacterLinkFixBot(SingleSiteBot, CurrentPageBot):
+    """
+    Bot to reverse character names in links.
+    """
 
-def should_reverse(title: str, valid_names: set) -> bool:
-    return title in valid_names
+    def __init__(self, generator, valid_names, **kwargs):
+        """
+        Constructor.
+        
+        Args:
+            generator: The page generator.
+            valid_names (set): A set of valid character names (already in correct order).
+        """
+        self.available_options.update({
+            'always': False,
+            'summary': 'Bot: Reverse character name links (Standardization)',
+        })
+        super().__init__(site=True, generator=generator, **kwargs)
+        self.valid_names = valid_names
 
-def process_links(text: str, valid_names: set) -> str:
-    placeholders = {}
-    placeholder_id = 0
+    def reverse_name(self, name: str) -> str:
+        """
+        Reverses a name string.
+        Example: "Aoi Megumi" -> "Megumi Aoi"
+        """
+        parts = name.split()
+        if len(parts) >= 2:
+            return ' '.join(parts[::-1])
+        return name
 
-    def protect_block(match):
-        nonlocal placeholder_id
-        placeholder = f"__BOT_PROTECT_{placeholder_id}__"
-        placeholders[placeholder] = match.group(0)
-        placeholder_id += 1
-        return placeholder
-
-    protected_text = re.sub(
-        r'(<nowiki>.*?</nowiki>|<!--.*?-->|<pre>.*?</pre>|<source.*?>.*?</source>|<syntaxhighlight.*?>.*?</syntaxhighlight>)',
-        protect_block, text, flags=re.DOTALL | re.IGNORECASE
-    )
-
-    def replacer(match):
+    def replace_link(self, match):
+        """
+        Callback function to process each link match found by regex.
+        """
         full_match = match.group(0)
         raw_target = match.group(1).strip()
-        display_text = match.group(3)
+        # group(2) is the pipe including |, group(3) is the text after pipe
+        display_text = match.group(3) 
 
+        # Handle anchors (e.g., [[Page#Section]])
         if '#' in raw_target:
             base_target, anchor_part = raw_target.split('#', 1)
             anchor_part = f'#{anchor_part}'
@@ -46,125 +74,134 @@ def process_links(text: str, valid_names: set) -> str:
             base_target = raw_target
             anchor_part = ''
 
+        # Calculate potential new target
         new_base_target = base_target
-        reversed_base_candidate = reverse_name(base_target)
+        reversed_candidate = self.reverse_name(base_target)
 
-        if reversed_base_candidate in valid_names and reversed_base_candidate != base_target:
-            new_base_target = reversed_base_candidate
-
+        # LOGIC CHECK: Only change if the reversed version is in the valid list
+        # and it is different from the current target.
+        if reversed_candidate in self.valid_names and reversed_candidate != base_target:
+            new_base_target = reversed_candidate
+        
         final_target = new_base_target + anchor_part
 
+        # If no change in target, return original text
         if final_target == raw_target:
+            # Cleanup: if [[Target|Target]], simplify to [[Target]]
             if display_text and display_text.strip() == base_target:
                 return f'[[{final_target}]]'
             return full_match
 
+        # Construct the new link
         if display_text:
+            # If label matches the new target or old target, simplify link
             if display_text.strip() == base_target or display_text.strip() == new_base_target:
                 return f'[[{final_target}]]'
             return f'[[{final_target}|{display_text}]]'
         else:
             return f'[[{final_target}]]'
 
-    pattern = re.compile(r'\[\[([^\|\]]+)(\|([^\]]+))?\]\]')
-    processed_text = pattern.sub(replacer, protected_text)
+    def treat_page(self):
+        """
+        Process a single page.
+        """
+        page = self.current_page
+        
+        # Skip Main Page
+        if page.title() == self.site.siteinfo['mainpage']:
+            pywikibot.info(f'Skipping Main Page: {page.title()}')
+            return
 
-    for placeholder, original in placeholders.items():
-        processed_text = processed_text.replace(placeholder, original)
+        # Skip non-main namespace (redundant if generator is filtered, but safe)
+        if page.namespace() != 0:
+            pywikibot.info(f'Skipping non-article page: {page.title()}')
+            return
 
-    return processed_text
+        pywikibot.info(f'Processing page: {page.title()}')
+        
+        text = page.text
+        original_text = text
 
-def get_valid_names_from_page(site) -> set:
+        # Regex to find links: [[Target]] or [[Target|Label]]
+        # Group 1: Target
+        # Group 2: |Label (optional)
+        # Group 3: Label (content of group 2 without pipe)
+        link_pattern = re.compile(r'\[\[([^\|\]]+)(\|([^\]]+))?\]\]')
+
+        # Use textlib.replaceExcept to safely replace text ignoring protected areas
+        # (nowiki, comments, pre, source, math, etc.)
+        new_text = textlib.replaceExcept(
+            text,
+            link_pattern,
+            self.replace_link,
+            ['comment', 'math', 'nowiki', 'pre', 'source', 'syntaxhighlight'],
+            site=self.site
+        )
+
+        # Save changes if any
+        if new_text != original_text:
+            self.put_current(new_text, summary=self.opt.summary, show_diff=True)
+        else:
+            pywikibot.info(f'No changes required for {page.title()}')
+
+def get_valid_names(site) -> set:
+    """
+    Fetches the list of valid names from the wiki page.
+    """
     page = pywikibot.Page(site, NAME_LIST_PAGE)
-    if not page.exists():
-        print(f"Không tìm thấy trang danh sách: {NAME_LIST_PAGE}")
-        return set()
-
-    text = page.text
-    lines = text.splitlines()
     names = set()
-    for line in lines:
+
+    if not page.exists():
+        pywikibot.warning(f"Name list page not found: {NAME_LIST_PAGE}")
+        return names
+
+    pywikibot.info(f"Loading valid names from {NAME_LIST_PAGE}...")
+    for line in page.text.splitlines():
         line = line.strip()
         if line.startswith("* "):
             name = line[2:].strip()
             if name:
                 names.add(name)
+    
+    pywikibot.info(f"Loaded {len(names)} valid names.")
     return names
 
-def reverse_links_on_page(site, page_title, valid_names, dry_run=False):
-    page = pywikibot.Page(site, page_title)
+def main(*args):
+    """
+    Main function.
+    """
+    local_args = pywikibot.handle_args(args)
+    gen_factory = pagegenerators.GeneratorFactory()
+    
+    options = {}
 
-    # Lấy tên Trang Chính từ thông tin của site và bỏ qua nó
-    main_page_title = site.siteinfo.get('mainpage')
-    if page.title() == main_page_title:
-        print(f"🔒  Bỏ qua Trang Chính: {page.title()}")
-        return
-
-    if page.namespace() != 0:
-        print(f"Bỏ qua trang không thuộc không gian tên chính: {page.title()}")
-        return
- 
-    text = page.text
-    new_text = process_links(text, valid_names)
- 
-    if new_text != text:
-        print(f"✨ Phát hiện thay đổi cho trang: {page.title()}")
-        
-        diff = difflib.unified_diff(
-            text.splitlines(keepends=True),
-            new_text.splitlines(keepends=True),
-            fromfile=f'a/{page.title()}',
-            tofile=f'b/{page.title()}',
-        )
-        print("--- Chi tiết thay đổi ---")
-        sys.stdout.writelines(diff)
-        print("--- Kết thúc thay đổi ---")
- 
-        if dry_run:
-            print(f"🔩 [Dry-run] Bỏ qua lưu trang.")
+    for arg in local_args:
+        if arg == '-always':
+            options['always'] = True
+        elif arg.startswith('-summary:'):
+            options['summary'] = arg[len('-summary:'):]
         else:
-            try:
-                page.text = new_text
-                page.save(summary="Bot: Đảo ngược liên kết nhân vật")
-                print(f"✅ Đã cập nhật trang: {page.title()}")
-            except Exception as e:
-                print(f"❌ Lỗi khi lưu trang {page.title()}: {e}")
-    else:
-        print(f"👌 Không có thay đổi trên trang: {page.title()}")
-
-def process_multiple_pages(pages, valid_names, dry_run=False):
-    site = pywikibot.Site()
-    site.login()
- 
-    for i, title in enumerate(pages):
-        if i > 0:
-            print("\n" + "="*50)
-        try:
-            reverse_links_on_page(site, title.strip(), valid_names, dry_run=dry_run)
-        except Exception as e:
-            print(f"Lỗi với trang '{title}': {e}")
-
-if __name__ == "__main__":
-    dry_run = '--dry-run' in sys.argv
+            gen_factory.handle_arg(arg)
 
     site = pywikibot.Site()
-    site.login()
-
-    valid_names = get_valid_names_from_page(site)
-
+    
+    # 1. Load valid names first
+    valid_names = get_valid_names(site)
     if not valid_names:
-        print("Không lấy được danh sách tên hợp lệ. Dừng script.")
-        sys.exit(1)
+        pywikibot.error("No valid names found. Aborting.")
+        return
 
-    # Nếu không có trang nào được nhập, mặc định lấy tất cả trang trong namespace 0
-    if len(sys.argv) > 1 and sys.argv[1] != '--dry-run':
-        input_pages = sys.argv[1:]
-    else:
-        print("Không có tên trang nào được cung cấp. Sẽ xử lý tất cả các trang trong không gian tên Chính.")
-        all_pages = site.allpages(namespace=0)
-        input_pages = [page.title() for page in all_pages]
+    # 2. Get generator
+    generator = gen_factory.getCombinedGenerator()
 
-    if not input_pages:
-        print("Không có trang nào để xử lý. Kết thúc.")
+    # NOTE: Unlike the old script, we do NOT default to ALL pages automatically for safety.
+    # Users should explicitily pass -start:! or -ns:0 to run on all pages.
+    if generator:
+        generator = pagegenerators.PreloadingGenerator(generator)
+        bot = CharacterLinkFixBot(generator=generator, valid_names=valid_names, **options)
+        bot.run()
     else:
-        process_multiple_pages(input_pages, valid_names, dry_run=dry_run)
+        pywikibot.bot.suggest_help(missing_generator=True)
+
+if __name__ == '__main__':
+    main()
