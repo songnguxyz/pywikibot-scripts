@@ -1,0 +1,14 @@
+# Pywikibot configurations
+user-config.py
+user-password.py
+passwordfile
+.pywikibot/
+
+# Python temporary files
+__pycache__/
+*.pyc
+*.log
+
+# Virtual environment
+venv/
+env/
