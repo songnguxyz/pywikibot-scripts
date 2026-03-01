@@ -1,8 +1,9 @@
-# Pywikibot configurations
+# Pywikibot things
 user-config.py
 user-password.py
 passwordfile
 .pywikibot/
+__init__.py
 
 # Python temporary files
 __pycache__/
