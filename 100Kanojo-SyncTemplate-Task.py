@@ -18,9 +18,6 @@ class TemplateSyncBot(bot.BaseBot):
     """
     Bot to sync template content from source site to target site.
     """
-    
-    # CRITICAL FIX: Tell BaseBot we are processing tuples, not Page objects
-    treat_page_type = tuple
 
     def __init__(self, generator, source_site, target_site, **kwargs):
         """Constructor."""
@@ -33,6 +30,29 @@ class TemplateSyncBot(bot.BaseBot):
         self.source_site = source_site
         self.target_site = target_site
 
+    def run(self):
+        """
+        Override the default BaseBot.run() method.
+        Since BaseBot strictly expects pywikibot.Page objects in some
+        Pywikibot versions, we bypass its internal loop and handle our
+        custom tuple generator manually.
+        """
+        if not self.generator:
+            pywikibot.info("No generator found or mapping is empty. Exiting.")
+            return
+
+        pywikibot.info("Starting synchronization process...")
+        
+        for pair in self.generator:
+            try:
+                self.treat(pair)
+            except KeyboardInterrupt:
+                pywikibot.info("Process interrupted by the user.")
+                break
+            except Exception as e:
+                # Catch any unexpected errors to prevent the bot from crashing completely
+                pywikibot.error(f"Unexpected error while processing pair {pair}: {e}")
+
     def treat(self, pair):
         """
         Process a single pair of templates.
@@ -42,6 +62,7 @@ class TemplateSyncBot(bot.BaseBot):
         """
         source_title, target_title = pair
 
+        # Initialize Page objects in Template namespace (ns=10)
         source_page = pywikibot.Page(self.source_site, source_title, ns=10)
         target_page = pywikibot.Page(self.target_site, target_title, ns=10)
 
@@ -59,7 +80,7 @@ class TemplateSyncBot(bot.BaseBot):
                 pywikibot.info(f"No changes needed for {target_page.title()}")
                 return
             
-            # userPut automatically handles diff display, confirmations, and rate throttling
+            # userPut handles API rate throttling automatically and safely
             self.userPut(
                 target_page,
                 target_page.text if target_page.exists() else "",
@@ -68,8 +89,8 @@ class TemplateSyncBot(bot.BaseBot):
                 ignore_save_related_errors=True
             )
 
-        except Error as e:
-            pywikibot.error(f"Error processing {target_page.title()}: {e}")
+        except pywikibot.exceptions.Error as e:
+            pywikibot.error(f"API Error processing {target_page.title()}: {e}")
 
 def load_mappings(site, mapping_page_title):
     """
